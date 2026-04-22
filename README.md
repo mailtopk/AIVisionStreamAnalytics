@@ -4,3 +4,4 @@ This is a modular video analytics pipeline developed in C++ on top of NVIDIA Dee
 
 ![tracker](images/obj_tracker.gif)
 
+
