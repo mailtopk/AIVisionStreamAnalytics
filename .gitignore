@@ -1,6 +1,13 @@
 # Prerequisites
 *.d
 
+#executable 
+aivisionstreamer
+
+#model files
+*.onnx
+*.engine
+
 # Compiled Object files
 *.slo
 *.lo

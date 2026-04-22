@@ -1,0 +1,40 @@
+[property]
+enable=1
+# Resolution (1280×720)
+config-width=1280
+config-height=720
+
+[roi-filtering-stream-0]
+enable=1
+# A rectangle covering the center of the screen
+# Points: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+roi-RF=320;180;960;180;960;540;320;540
+inverse-roi=0
+class-id=0;2
+
+[line-crossing-stream-0]
+enable=1
+# Vertical line down the center at x=640
+# Entry: Direction left-to-right, counting at center line
+#line-crossing-Entry=320;360;960;360;500;180;500;540
+# Exit: Direction right-to-left, counting at same center line
+line-crossing-Exit=960;360;320;360;500;180;500;540
+# Track using object class IDs (0=person, 2=car, etc.)
+class-id=0;2
+# Enable frame-based counting (counts per frame)
+#frame-based-counting=1
+extended=0
+#LC modes supported:
+#loose   : counts all crossing without strong adherence to direction
+#balanced: Strict direction adherence expected compared to mode=loose
+#strict  : Strict direction adherence expected compared to mode=balanced
+mode=loose
+
+[overcrowding-stream-0]
+enable=1
+# Define regions where you want to detect overcrowding
+# Format: region-id=x1;y1;x2;y2;x3;y3;x4;y4 (polygon points)
+roi-OC=320;180;960;180;960;540;320;540
+# Occupancy threshold - alert when objects exceed this count
+object-threshold=3
+class-id=0;2

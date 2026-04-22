@@ -1,0 +1,26 @@
+[property]
+gpu-id=0
+net-scale-factor=0.0039215697906911373
+
+#onnx-file=../mdls/yolov8n.onnx
+model-engine-file=../mdls/yolov8nfp16.engine
+labelfile-path=./labels.txt
+
+batch-size=2
+network-mode=2 #0 FP32, 2FP16 
+num-detected-classes=80
+interval=0
+
+gie-unique-id=1
+process-mode=1
+
+network-type=0
+cluster-mode=2
+maintain-aspect-ratio=1
+
+custom-lib-path=../shrobj/lib_custom_inf_impl.so
+parse-bbox-func-name=NvDsInferParseCustomYolo
+
+# Run 'trtexec --loadEngine=yolov8n.engine --exportLayerInfo=layers.json' to confirm this name
+#$ /usr/src/tensorrt/bin/trtexec --loadEngine=./tensorrt_engine/yolov8n.engine --exportLayerInfo=./tensorrt_engine/yolov8nlayer.joson
+

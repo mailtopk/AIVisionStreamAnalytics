@@ -1,0 +1,13 @@
+NvDCF:
+  # [Required] [0: IOU, 1: NvDCF]
+  useGPU: 1
+  # Max target to track per stream
+  maxTargetsPerStream: 150
+  # Search region for correlation filter
+  searchRegionPaddingScale: 0.6
+  # Filter Size
+  filterSize: 17
+  # Minimum confidence for a track to be considered valid
+  minDetectorConfidence: 0.2
+  # Feature extraction for Re-ID (helps with occlusions)
+  useReid: 0
