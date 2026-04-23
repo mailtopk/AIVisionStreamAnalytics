@@ -2,21 +2,27 @@
 $ sudo nvpmodel -m 0 --for MAX perf and power
 $ sudo jetson_clocks
 
-$ g++ -std=c++17 -o ds-objtracker src/aivision_pipeline.cpp -I /opt/nvidia/deepstream/deepstream-7.1/sources/includes -I /usr/local/cuda/include $(pkg-config --cflags --libs gstreamer-1.0 glib-2.0) -L /opt/nvidia/deepstream/deepstream-7.1/lib -lnvdsgst_meta -lnvds_meta -lnvdsgst_helper -lnvds_infer
+$ g++ -std=c++17 -o aivisionstreamer src/aivision_pipeline.cpp -I /opt/nvidia/deepstream/deepstream-7.1/sources/includes -I /usr/local/cuda/include $(pkg-config --cflags --libs gstreamer-1.0 glib-2.0) -L /opt/nvidia/deepstream/deepstream-7.1/lib -lnvdsgst_meta -lnvds_meta -lnvdsgst_helper -lnvds_infer
 
 PIPELINE 
 CSI Camera (Live) → Direct to capsfilter
 MP4 File (H.265) → Demux → H.265 Parser → Hardware Decoder → Memory Convert
 
 USAGE:
-  ./ds-objtracker                         Use CSI camera  (default)
-  ./ds-objtracker --input video.mp4       Analyze MP4 file (default: save to file)
-  ./ds-objtracker --display               Display output on screen
+  ./aivisionstreamer                         Use CSI camera  (default)
+  ./aivisionstreamer --input video.mp4       Analyze MP4 file (default: save to file)
+  ./aivisionstreamer --display               Display output on screen
   
 EXAMPLES:
-  ./ds-objtracker
-  ./ds-objtracker --input myvideo.mp4
-  ./ds-objtracker --input myvideo.mp4 --display
+  ./aivisionstreamer
+  ./aivisionstreamer --input myvideo.mp4
+  ./aivisionstreamer --input myvideo.mp4 --display
+  ./aivisionstreamer --input myvideo.mp4 --headless
+
+
+  nvarguscamerasrc → capsfilter → nvstreammux → queue → nvinfer → queue → nvtracker 
+→ queue → nvdsanalytics → queue → nvvideoconvert → nvdsosd → queue → nveglglessink
+
 */
 
 #include "aivision_pipeline.h"
@@ -118,7 +124,7 @@ GstElement* SinkFactory::createSink() const {
 GstElement* SinkFactory::createDisplaySink() const {
     GstElement* sink = gst_element_factory_make("nveglglessink", "egl-sink");
     if (!sink) {
-        std::cout << "⚠ nveglglessink not available, falling back to fakesink\n";
+        std::cout << "nveglglessink not available, falling back to fakesink\n";
         sink = gst_element_factory_make("fakesink", "sink");
         if (sink) {
             g_object_set(G_OBJECT(sink), "sync", TRUE, NULL);
@@ -343,14 +349,23 @@ void PipelineBuilder::createElements() {
     
     // Common processing elements
     createElement("capsfilter", "capsfilter");
+
     createElement("nvstreammux", "streammux");
-    createElement("nvinfer", "pgie");
+    createElement("queue", "queue_mux"); //decouples batching from inference
+
+    createElement("nvinfer", "infrence");
+    createElement("queue", "queue_infer"); //lets inference run asynchronously
+
     createElement("nvtracker", "tracker");
+    createElement("queue", "queue_tracker"); //prevents tracker from stalling inference
+
     createElement("nvdsanalytics", "analytics");
-    createElement("queue", "queue1");
+    createElement("queue", "queue_analytics"); //isolates CPU-heavy analytics
+
     createElement("nvvideoconvert", "nvvidconv_osd");
     createElement("nvdsosd", "osd");
-    createElement("queue", "queue2");
+
+    createElement("queue", "queue_sink"); //avoids display blocking everything/Preventing a slow display
     
     // Sink element
     SinkFactory sink_factory(m_config);
@@ -368,7 +383,7 @@ void PipelineBuilder::configureElements() {
     
     configureSourceElement(m_elements["source"]);
     configureStreammux(m_elements["streammux"]);
-    configureInference(m_elements["pgie"]);
+    configureInference(m_elements["infrence"]);
     configureTracker(m_elements["tracker"]);
     configureAnalytics(m_elements["analytics"]);
     configureQueues();
@@ -401,9 +416,9 @@ void PipelineBuilder::configureStreammux(GstElement* streammux) {
     std::cout << "Streammux configured\n";
 }
 
-void PipelineBuilder::configureInference(GstElement* pgie) {
-    g_object_set(G_OBJECT(pgie), "config-file-path", m_config.infer_config_path.c_str(), NULL);
-    std::cout << "Inference (PGIE) configured\n";
+void PipelineBuilder::configureInference(GstElement* infrence) {
+    g_object_set(G_OBJECT(infrence), "config-file-path", m_config.infer_config_path.c_str(), NULL);
+    std::cout << "Inference (infrence) configured\n";
 }
 
 void PipelineBuilder::configureTracker(GstElement* tracker) {
@@ -423,11 +438,27 @@ void PipelineBuilder::configureAnalytics(GstElement* analytics) {
 }
 
 void PipelineBuilder::configureQueues() {
-    g_object_set(G_OBJECT(m_elements["queue1"]),
+
+    g_object_set(G_OBJECT(m_elements["queue_mux"]),
                  "max-size-buffers", m_config.queue_max_buffers,
                  "max-size-time", 0,
                  NULL);
-    g_object_set(G_OBJECT(m_elements["queue2"]),
+
+    g_object_set(G_OBJECT(m_elements["queue_infer"]),
+                 "max-size-buffers", m_config.queue_max_buffers,
+                 "max-size-time", 0,
+                 NULL);
+
+    g_object_set(G_OBJECT(m_elements["queue_tracker"]),
+                 "max-size-buffers", m_config.queue_max_buffers,
+                 "max-size-time", 0,
+                 NULL);
+
+    g_object_set(G_OBJECT(m_elements["queue_analytics"]),
+                 "max-size-buffers", m_config.queue_max_buffers,
+                 "max-size-time", 0,
+                 NULL);
+    g_object_set(G_OBJECT(m_elements["queue_sink"]),
                  "max-size-buffers", m_config.queue_max_buffers,
                  "max-size-time", 0,
                  NULL);
@@ -482,13 +513,21 @@ void PipelineBuilder::linkProcessingChain() {
     
     // Main processing chain
     if (!gst_element_link_many(m_elements["streammux"],
-                               m_elements["pgie"],
+                               m_elements["queue_mux"],
+
+                               m_elements["infrence"],
+                               m_elements["queue_infer"],
+
                                m_elements["tracker"],
+                               m_elements["queue_tracker"],
+
                                m_elements["analytics"],
-                               m_elements["queue1"],
+                               m_elements["queue_analytics"],
+
                                m_elements["nvvidconv_osd"],
                                m_elements["osd"],
-                               m_elements["queue2"],
+
+                               m_elements["queue_sink"],
                                m_elements["sink"],
                                NULL)) {
         throw GStreamerException("Failed to link processing chain");
