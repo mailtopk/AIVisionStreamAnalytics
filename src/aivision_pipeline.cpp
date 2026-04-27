@@ -4,12 +4,8 @@ $ sudo jetson_clocks
 
 $ g++ -std=c++17 -o aivisionstreamer src/aivision_pipeline.cpp -I /opt/nvidia/deepstream/deepstream-7.1/sources/includes -I /usr/local/cuda/include $(pkg-config --cflags --libs gstreamer-1.0 glib-2.0) -L /opt/nvidia/deepstream/deepstream-7.1/lib -lnvdsgst_meta -lnvds_meta -lnvdsgst_helper -lnvds_infer
 
-PIPELINE 
-CSI Camera (Live) → Direct to capsfilter
-MP4 File (H.265) → Demux → H.265 Parser → Hardware Decoder → Memory Convert
-
 USAGE:
-  ./aivisionstreamer                         Use CSI camera  (default)
+  ./aivisionstreamer                         Use I2C camera  (default)
   ./aivisionstreamer --input video.mp4       Analyze MP4 file (default: save to file)
   ./aivisionstreamer --display               Display output on screen
   
@@ -19,19 +15,11 @@ EXAMPLES:
   ./aivisionstreamer --input myvideo.mp4 --display
   ./aivisionstreamer --input myvideo.mp4 --headless
 
-
-  nvarguscamerasrc → capsfilter → nvstreammux → queue → nvinfer → queue → nvtracker 
-→ queue → nvdsanalytics → queue → nvvideoconvert → nvdsosd → queue → nveglglessink
-
 */
 
 #include "aivision_pipeline.h"
 #include <csignal>
 #include <sstream>
-
-// ============================================================================
-// CONFIGURATION IMPLEMENTATION
-// ============================================================================
 
 bool PipelineConfiguration::validate() const {
     if (source_type == SourceType::FILE && input_file.empty()) {
@@ -75,9 +63,9 @@ void PipelineConfiguration::print() const {
 
 GstElement* SourceFactory::createSource() const {
     switch (m_config.source_type) {
-        case SourceType::CSI_CAMERA:
+        case SourceType::CSI_CAMERA: //I2C camera
             return createCameraSource();
-        case SourceType::FILE:
+        case SourceType::FILE: //MP4 file input
             return createFileSource();
         default:
             throw GStreamerException("Unknown source type");
@@ -105,10 +93,6 @@ GstElement* SourceFactory::createFileSource() const {
     }
     return source;
 }
-
-// ============================================================================
-// SINK FACTORY IMPLEMENTATION
-// ============================================================================
 
 GstElement* SinkFactory::createSink() const {
     switch (m_config.output_type) {
@@ -148,10 +132,6 @@ GstElement* SinkFactory::createHeadlessSink() const {
     }
     return sink;
 }
-
-// ============================================================================
-// ANALYTICS PROCESSOR IMPLEMENTATION
-// ============================================================================
 
 void AnalyticsProcessor::processMetadata(NvDsBatchMeta* batch_meta) {
     if (!batch_meta) return;
@@ -205,10 +185,6 @@ void AnalyticsProcessor::processAnalyticsFrame(NvDsAnalyticsFrameMeta* meta) {
     }
     std::cout << std::string(50, '-') << "\n";
 }
-
-// ============================================================================
-// PAD PROBE CALLBACKS
-// ============================================================================
 
 static GstPadProbeReturn analyticsPadProbe(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
     GstBuffer* buf = static_cast<GstBuffer*>(info->data);
@@ -353,7 +329,7 @@ void PipelineBuilder::createElements() {
     createElement("nvstreammux", "streammux");
     createElement("queue", "queue_mux"); //decouples batching from inference
 
-    createElement("nvinfer", "infrence");
+    createElement("nvinfer", "infrence"); // Primary GPU Inference engine
     createElement("queue", "queue_infer"); //lets inference run asynchronously
 
     createElement("nvtracker", "tracker");
@@ -777,7 +753,3 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 }
-
-
-
-
