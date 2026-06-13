@@ -40,3 +40,5 @@ $bash compile.sh
 - The center box defines the ROI for object counting
 - Directional arrows indicate the valid movement direction—only objects moving along this path are analyzed
 - A virtual line counts only those objects that cross it in the specified direction (top-to-bottom)
+
+

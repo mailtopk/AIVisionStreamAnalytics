@@ -20,6 +20,354 @@ EXAMPLES:
 #include "aivision_pipeline.h"
 #include <csignal>
 #include <sstream>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+// ============================================================================
+// VECTOR DATA IMPLEMENTATION
+// ============================================================================
+
+std::string VectorData::serialize() const {
+    std::stringstream ss;
+    ss << track_id << "|" << frame_id << "|" << class_id << "|" << confidence << "|" << timestamp;
+    
+    // Add embedding vector (comma-separated floats)
+    ss << "|";
+    for (size_t i = 0; i < embedding.size(); i++) {
+        if (i > 0) ss << ",";
+        ss << embedding[i];
+    }
+    
+    return ss.str();
+}
+
+VectorData VectorData::deserialize(const std::string& data) {
+    VectorData vec;
+    std::stringstream ss(data);
+    std::string token;
+    int field = 0;
+    
+    while (std::getline(ss, token, '|')) {
+        switch (field) {
+            case 0: vec.track_id = std::stoul(token); break;
+            case 1: vec.frame_id = std::stoul(token); break;
+            case 2: vec.class_id = std::stoul(token); break;
+            case 3: vec.confidence = std::stof(token); break;
+            case 4: vec.timestamp = token; break;
+            case 5: {
+                // Parse embedding vector
+                std::stringstream embed_ss(token);
+                std::string val;
+                while (std::getline(embed_ss, val, ',')) {
+                    vec.embedding.push_back(std::stof(val));
+                }
+                break;
+            }
+        }
+        field++;
+    }
+    
+    return vec;
+}
+
+// ============================================================================
+// FAISS VECTOR DATABASE IMPLEMENTATION (required)
+// ============================================================================
+
+FAISSVectorDB::FAISSVectorDB(const std::string& index_path, const std::string& metadata_path)
+    : m_index_path(index_path), m_metadata_path(metadata_path) {
+    initialize();
+}
+
+FAISSVectorDB::~FAISSVectorDB() {
+    close();
+}
+
+bool FAISSVectorDB::initialize() {
+    try {
+        // Try to load existing index
+        if (loadIndex()) {
+            std::cout << "FAISS: Loaded existing index from " << m_index_path << "\n";
+            m_initialized = true;
+            return true;
+        }
+        
+        // Index will be created when first vector is added
+        m_initialized = true;
+        std::cout << "FAISS: New index will be created\n";
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "FAISS initialization error: " << e.what() << "\n";
+        return false;
+    }
+}
+
+bool FAISSVectorDB::storeVector(const VectorData& vector) {
+    if (!m_initialized) {
+        return false;
+    }
+    
+    try {
+        // Set vector dimension on first vector
+        if (m_metadata.empty() && !vector.embedding.empty()) {
+            m_vector_dim = vector.embedding.size();
+            
+            // Create index if not already created
+            if (!m_index) {
+                m_index = new faiss::IndexFlatL2(m_vector_dim);
+            }
+        }
+        
+        // Add vector to index
+        if (m_vector_dim > 0 && vector.embedding.size() == m_vector_dim) {
+            auto* index = static_cast<faiss::IndexFlat*>(m_index);
+            index->add(1, vector.embedding.data());
+            m_metadata.push_back(vector);
+            
+            // Save periodically (every 100 vectors)
+            if (m_metadata.size() % 100 == 0) {
+                saveIndex();
+            }
+            
+            return true;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error storing vector in FAISS: " << e.what() << "\n";
+    }
+    
+    return false;
+}
+
+std::vector<VectorData> FAISSVectorDB::getVectorsByTrackId(guint track_id) {
+    std::vector<VectorData> results;
+    for (const auto& vec : m_metadata) {
+        if (vec.track_id == track_id) {
+            results.push_back(vec);
+        }
+    }
+    return results;
+}
+
+std::vector<std::pair<float, VectorData>> FAISSVectorDB::similaritySearch(
+    const std::vector<float>& query_vector, int k) {
+    
+    std::vector<std::pair<float, VectorData>> results;
+    
+    if (!m_index || query_vector.empty() || m_metadata.empty()) {
+        return results;
+    }
+    
+    try {
+        if (query_vector.size() != m_vector_dim) {
+            std::cerr << "Query vector dimension mismatch\n";
+            return results;
+        }
+        
+        auto* index = static_cast<faiss::IndexFlat*>(m_index);
+        int limit = std::min(k, static_cast<int>(m_metadata.size()));
+        
+        std::vector<float> distances(limit);
+        std::vector<long> labels(limit);
+        
+        index->search(1, query_vector.data(), limit, distances.data(), labels.data());
+        
+        for (int i = 0; i < limit; i++) {
+            long lbl = labels[i];
+            if (lbl >= 0 && lbl < static_cast<long>(m_metadata.size())) {
+                results.push_back(std::make_pair(distances[i], m_metadata[static_cast<size_t>(lbl)]));
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error in FAISS similarity search: " << e.what() << "\n";
+    }
+    
+    return results;
+}
+
+std::vector<VectorData> FAISSVectorDB::getAllVectors() {
+    return m_metadata;
+}
+
+bool FAISSVectorDB::loadIndex() {
+    try {
+        std::ifstream index_file(m_index_path, std::ios::binary);
+        if (!index_file.good()) {
+            return false;
+        }
+        
+        m_index = faiss::read_index(m_index_path.c_str());
+        
+        if (!m_index) {
+            return false;
+        }
+        
+        m_vector_dim = static_cast<faiss::IndexFlat*>(m_index)->d;
+        
+        // Load metadata
+        std::ifstream metadata_file(m_metadata_path);
+        std::string line;
+        while (std::getline(metadata_file, line)) {
+            if (!line.empty()) {
+                m_metadata.push_back(VectorData::deserialize(line));
+            }
+        }
+        
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading FAISS index: " << e.what() << "\n";
+        return false;
+    }
+}
+
+bool FAISSVectorDB::saveIndex() {
+    try {
+        if (!m_index) {
+            return false;
+        }
+        
+        // Save index
+        faiss::write_index(static_cast<faiss::IndexFlat*>(m_index), m_index_path.c_str());
+        
+        // Save metadata
+        std::ofstream metadata_file(m_metadata_path, std::ios::trunc);
+        for (const auto& vec : m_metadata) {
+            metadata_file << vec.serialize() << "\n";
+        }
+        metadata_file.flush();
+        
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving FAISS index: " << e.what() << "\n";
+        return false;
+    }
+}
+
+void FAISSVectorDB::close() {
+    if (m_index) {
+        saveIndex();
+        delete static_cast<faiss::IndexFlat*>(m_index);
+        m_index = nullptr;
+        m_initialized = false;
+    }
+}
+
+// ============================================================================
+// SGIE PROCESSOR IMPLEMENTATION
+// ============================================================================
+
+SGIEProcessor::SGIEProcessor(std::unique_ptr<IVectorDatabase> db) : m_vector_db(std::move(db)) {}
+
+void SGIEProcessor::processMetadata(NvDsBatchMeta* batch_meta) {
+    if (!batch_meta) return;
+    
+    for (NvDsFrameMetaList* l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta* frame_meta = static_cast<NvDsFrameMeta*>(l_frame->data);
+        processFrameMetadata(frame_meta);
+    }
+}
+
+void SGIEProcessor::processFrameMetadata(NvDsFrameMeta* frame_meta) {
+    if (!frame_meta) return;
+    
+    for (NvDsObjectMetaList* l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+        NvDsObjectMeta* obj_meta = static_cast<NvDsObjectMeta*>(l_obj->data);
+        processObjectMetadata(obj_meta, frame_meta->frame_num);
+    }
+}
+
+void SGIEProcessor::processObjectMetadata(NvDsObjectMeta* obj_meta, guint frame_id) {
+    if (!obj_meta) return;
+    
+    // Look for SGIE (Secondary GIE) inference metadata in object user metadata
+    for (NvDsUserMetaList* l_user = obj_meta->obj_user_meta_list; l_user != NULL; 
+         l_user = l_user->next) {
+        NvDsUserMeta* user_meta = static_cast<NvDsUserMeta*>(l_user->data);
+        
+        // Check for infer tensor output metadata
+        if (user_meta->base_meta.meta_type == NVDSINFER_TENSOR_OUTPUT_META) {
+            NvDsInferTensorMeta* tensor_meta = static_cast<NvDsInferTensorMeta*>(user_meta->user_meta_data);
+            
+            // Extract embedding vector
+            std::vector<float> embedding = extractTensorData(tensor_meta);
+            
+            if (!embedding.empty()) {
+                VectorData vec;
+                vec.track_id = obj_meta->object_id;
+                vec.frame_id = frame_id;
+                vec.class_id = obj_meta->class_id;
+                vec.confidence = obj_meta->confidence;
+                vec.embedding = embedding;
+                
+                // Generate timestamp
+                auto now = std::chrono::system_clock::now();
+                auto time = std::chrono::system_clock::to_time_t(now);
+                std::stringstream ss;
+                ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
+                vec.timestamp = ss.str();
+                
+                // Store vector
+                if (m_vector_db && m_vector_db->storeVector(vec)) {
+                    m_vector_count++;
+                    
+                    // Log every 100 vectors
+                    if (m_vector_count % 100 == 0) {
+                        std::cout << "SGIE: Processed " << m_vector_count 
+                                 << " vectors (Track ID: " << vec.track_id 
+                                 << ", Size: " << embedding.size() << ")\n";
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::vector<float> SGIEProcessor::extractTensorData(NvDsInferTensorMeta* tensor_meta) {
+    std::vector<float> embedding;
+    
+    if (!tensor_meta || tensor_meta->num_output_layers == 0) {
+        return embedding;
+    }
+    
+    try {
+        // Get the first output buffer - prefer host buffers
+        void* data_ptr = nullptr;
+        
+        if (tensor_meta->out_buf_ptrs_host) {
+            data_ptr = tensor_meta->out_buf_ptrs_host[0];
+        } else if (tensor_meta->out_buf_ptrs_dev) {
+            // Device buffers require GPU->CPU transfer
+            std::cerr << "Warning: Only device buffers available. Skipping tensor extraction.\n";
+            return embedding;
+        }
+        
+        if (data_ptr && tensor_meta->output_layers_info) {
+            NvDsInferLayerInfo* layer = &tensor_meta->output_layers_info[0];
+            
+            // Get number of elements (suppress deprecation warning)
+            #pragma GCC diagnostic push
+            #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+            guint num_elements = layer->dims.numElements;
+            #pragma GCC diagnostic pop
+            
+            if (num_elements > 0) {
+                float* float_data = static_cast<float*>(data_ptr);
+                embedding.assign(float_data, float_data + num_elements);
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error extracting tensor data: " << e.what() << "\n";
+    }
+    
+    return embedding;
+}
+
+// ============================================================================
+// ORIGINAL IMPLEMENTATION CONTINUES BELOW
+// ============================================================================
 
 bool PipelineConfiguration::validate() const {
     if (source_type == SourceType::FILE && input_file.empty()) {
@@ -52,6 +400,10 @@ void PipelineConfiguration::print() const {
               << "║ Model: YOLO + NvDCF Tracker                 ║\n"
               << "║ Tracker Resolution: " << tracker_width << "x" << tracker_height
               << std::string(19 - std::to_string(tracker_height).length(), ' ') << "║\n"
+              << "║ SGIE (ReID): " << (enable_sgie ? "ENABLED" : "DISABLED")
+              << std::string(32 - (enable_sgie ? 7 : 8), ' ') << "║\n"
+              << "║ Vector DB: " << vector_db_path
+              << std::string(32 - vector_db_path.length(), ' ') << "║\n"
               << "║────────────────────────────────────────────────║\n"
               << "║ Press Ctrl+C to exit gracefully              ║\n"
               << "╚════════════════════════════════════════════════╝\n\n";
@@ -332,6 +684,12 @@ void PipelineBuilder::createElements() {
     createElement("nvinfer", "infrence"); // Primary GPU Inference engine
     createElement("queue", "queue_infer"); //lets inference run asynchronously
 
+    // SGIE for ReID embedding extraction
+    if (m_config.enable_sgie) {
+        createElement("nvinfer", "sgie");
+        createElement("queue", "queue_sgie"); // decouple SGIE from tracker
+    }
+
     createElement("nvtracker", "tracker");
     createElement("queue", "queue_tracker"); //prevents tracker from stalling inference
 
@@ -360,6 +718,11 @@ void PipelineBuilder::configureElements() {
     configureSourceElement(m_elements["source"]);
     configureStreammux(m_elements["streammux"]);
     configureInference(m_elements["infrence"]);
+    
+    if (m_config.enable_sgie && m_elements.find("sgie") != m_elements.end()) {
+        configureSGIE(m_elements["sgie"]);
+    }
+    
     configureTracker(m_elements["tracker"]);
     configureAnalytics(m_elements["analytics"]);
     configureQueues();
@@ -393,8 +756,11 @@ void PipelineBuilder::configureStreammux(GstElement* streammux) {
 }
 
 void PipelineBuilder::configureInference(GstElement* infrence) {
-    g_object_set(G_OBJECT(infrence), "config-file-path", m_config.infer_config_path.c_str(), NULL);
-    std::cout << "Inference (infrence) configured\n";
+    g_object_set(G_OBJECT(infrence), 
+                 "config-file-path", m_config.infer_config_path.c_str(),
+                 "unique-id", 1,
+                 NULL);
+    std::cout << "Inference (PGIE) configured with unique-id=1\n";
 }
 
 void PipelineBuilder::configureTracker(GstElement* tracker) {
@@ -413,6 +779,14 @@ void PipelineBuilder::configureAnalytics(GstElement* analytics) {
     std::cout << "Analytics configured\n";
 }
 
+void PipelineBuilder::configureSGIE(GstElement* sgie) {
+    g_object_set(G_OBJECT(sgie), 
+                 "config-file-path", m_config.sgie_config_path.c_str(),
+                 "unique-id", 2,
+                 NULL);
+    std::cout << "SGIE (Secondary GIE) configured with unique-id=2 for ReID embeddings\n";
+}
+
 void PipelineBuilder::configureQueues() {
 
     g_object_set(G_OBJECT(m_elements["queue_mux"]),
@@ -424,6 +798,13 @@ void PipelineBuilder::configureQueues() {
                  "max-size-buffers", m_config.queue_max_buffers,
                  "max-size-time", 0,
                  NULL);
+
+    if (m_config.enable_sgie && m_elements.find("queue_sgie") != m_elements.end()) {
+        g_object_set(G_OBJECT(m_elements["queue_sgie"]),
+                     "max-size-buffers", m_config.queue_max_buffers,
+                     "max-size-time", 0,
+                     NULL);
+    }
 
     g_object_set(G_OBJECT(m_elements["queue_tracker"]),
                  "max-size-buffers", m_config.queue_max_buffers,
@@ -487,26 +868,54 @@ void PipelineBuilder::linkProcessingChain() {
     gst_object_unref(mux_sinkpad);
     gst_object_unref(capsfilter_srcpad);
     
-    // Main processing chain
-    if (!gst_element_link_many(m_elements["streammux"],
-                               m_elements["queue_mux"],
+    // Main processing chain with optional SGIE
+    if (m_config.enable_sgie && m_elements.find("sgie") != m_elements.end()) {
+        // Chain with SGIE: streammux → queue_mux → infrence → queue_infer → sgie → queue_sgie → tracker
+        if (!gst_element_link_many(m_elements["streammux"],
+                                   m_elements["queue_mux"],
 
-                               m_elements["infrence"],
-                               m_elements["queue_infer"],
+                                   m_elements["infrence"],
+                                   m_elements["queue_infer"],
 
-                               m_elements["tracker"],
-                               m_elements["queue_tracker"],
+                                   m_elements["sgie"],
+                                   m_elements["queue_sgie"],
 
-                               m_elements["analytics"],
-                               m_elements["queue_analytics"],
+                                   m_elements["tracker"],
+                                   m_elements["queue_tracker"],
 
-                               m_elements["nvvidconv_osd"],
-                               m_elements["osd"],
+                                   m_elements["analytics"],
+                                   m_elements["queue_analytics"],
 
-                               m_elements["queue_sink"],
-                               m_elements["sink"],
-                               NULL)) {
-        throw GStreamerException("Failed to link processing chain");
+                                   m_elements["nvvidconv_osd"],
+                                   m_elements["osd"],
+
+                                   m_elements["queue_sink"],
+                                   m_elements["sink"],
+                                   NULL)) {
+            throw GStreamerException("Failed to link processing chain with SGIE");
+        }
+    } else {
+        // Chain without SGIE: streammux → queue_mux → infrence → queue_infer → tracker
+        if (!gst_element_link_many(m_elements["streammux"],
+                                   m_elements["queue_mux"],
+
+                                   m_elements["infrence"],
+                                   m_elements["queue_infer"],
+
+                                   m_elements["tracker"],
+                                   m_elements["queue_tracker"],
+
+                                   m_elements["analytics"],
+                                   m_elements["queue_analytics"],
+
+                                   m_elements["nvvidconv_osd"],
+                                   m_elements["osd"],
+
+                                   m_elements["queue_sink"],
+                                   m_elements["sink"],
+                                   NULL)) {
+            throw GStreamerException("Failed to link processing chain");
+        }
     }
     std::cout << "Processing chain linked\n";
 }
@@ -569,6 +978,14 @@ void PipelineManager::initialize() {
         // Create analytics processor
         m_analytics_processor = std::make_unique<AnalyticsProcessor>();
         
+        // Create SGIE processor with FAISS vector database (required)
+        if (m_config.enable_sgie) {
+            std::unique_ptr<IVectorDatabase> vector_db = std::make_unique<FAISSVectorDB>(
+                m_config.faiss_index_path, m_config.faiss_metadata_path);
+            std::cout << "Using FAISS vector database for fast similarity search\n";
+            m_sgie_processor = std::make_unique<SGIEProcessor>(std::move(vector_db));
+        }
+        
         // Setup bus watch
         setupBusWatch();
         
@@ -582,6 +999,29 @@ void PipelineManager::initialize() {
                 gst_object_unref(analytics_srcpad);
             }
             gst_object_unref(analytics);
+        }
+        
+        // Attach SGIE probe for vector extraction
+        if (m_config.enable_sgie && m_sgie_processor) {
+            GstElement* sgie = gst_bin_get_by_name(GST_BIN(m_pipeline), "sgie");
+            if (sgie) {
+                GstPad* sgie_srcpad = gst_element_get_static_pad(sgie, "src");
+                if (sgie_srcpad) {
+                    gst_pad_add_probe(sgie_srcpad, GST_PAD_PROBE_TYPE_BUFFER,
+                                     [](GstPad* pad, GstPadProbeInfo* info, gpointer user_data) -> GstPadProbeReturn {
+                                         GstBuffer* buf = static_cast<GstBuffer*>(info->data);
+                                         NvDsBatchMeta* batch_meta = gst_buffer_get_nvds_batch_meta(buf);
+                                         SGIEProcessor* processor = static_cast<SGIEProcessor*>(user_data);
+                                         if (processor && batch_meta) {
+                                             processor->processMetadata(batch_meta);
+                                         }
+                                         return GST_PAD_PROBE_OK;
+                                     },
+                                     m_sgie_processor.get(), NULL);
+                    gst_object_unref(sgie_srcpad);
+                }
+                gst_object_unref(sgie);
+            }
         }
         
         // Setup signal handlers

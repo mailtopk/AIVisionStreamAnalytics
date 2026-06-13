@@ -4,9 +4,13 @@
 #executable 
 aivisionstreamer
 
+# data 
+data/*
+
 #model files
 *.onnx
 *.engine
+mdls/*
 
 # Compiled Object files
 *.slo

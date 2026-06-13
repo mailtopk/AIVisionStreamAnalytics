@@ -1,0 +1,30 @@
+[property]
+gpu-id=0
+# 2 indicates Secondary GIE (SGIE) mode
+process-mode=2
+# Unique ID must differ from PGIE (PGIE is 1)
+gie-unique-id=2
+
+# For ONNX models (not encrypted TAO models), use onnx-file
+onnx-file=../mdls/reidentificationnet_transformer_deployable_v1.0/swin_tiny_market1501_aicity156_featuredim256.onnx
+# DeepStream will automatically generate this TensorRT engine file on the first run
+model-engine-file=../mdls/reidentificationnet_transformer_deployable_v1.0/swin_tiny_market1501_aicity156_featuredim256.engine
+
+# Model network properties (adjust dimensions based on model spec sheet)
+net-scale-factor=0.0039215697906911373
+offsets=123.675;116.28;103.53
+model-color-format=0
+network-mode=2 # 0=FP32, 1=INT8, 2=FP16
+
+# The target class ID assigned by your PGIE (e.g., 0 for "Person")
+operate-on-class-ids=0
+
+# REQUIRED FOR EMBEDDINGS:
+# 100 indicates "Other / Tensor output mode" instead of standard classification
+network-type=100
+# Force nvinfer to attach raw tensor outputs to metadata
+output-tensor-meta=1
+
+# Match the output layer name of your Transformer ReID model
+# Use the actual ONNX output name from the model
+output-blob-names=fc_pred
