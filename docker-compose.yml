@@ -1,0 +1,32 @@
+services:
+  vlm:
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: robot-vla:latest
+    container_name: robot-vla
+
+    runtime: nvidia
+
+    network_mode: host
+    ipc: host
+
+    stdin_open: true
+    tty: true
+
+    shm_size: "8gb"
+
+    working_dir: /workspace
+
+    environment:
+      HF_HOME: /models/hf
+      TRANSFORMERS_CACHE: /models/hf
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+
+    volumes:
+      - ./src:/workspace/src
+      - ./mdls:/models
+      - ./cache:/workspace/cache
